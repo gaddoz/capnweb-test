@@ -1,12 +1,13 @@
 {
   "compilerOptions": {
     "jsx": "react-jsx",
-    "jsxImportSource": "hono/jsx"
+    "jsxImportSource": "hono/jsx",
+    "lib": ["dom", "deno.ns"]
   },
   "tasks": {
     "dev": "deno run -A --watch main.ts"
   },
   "imports": {
-    "hono": "npm:hono@^4.11.7"
+    "hono": "jsr:@hono/hono@^4.11.7"
   }
 }

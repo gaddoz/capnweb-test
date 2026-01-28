@@ -1,14 +1,21 @@
 import { Hono } from "jsr:@hono/hono";
+import { RpcTarget, newWebSocketRpcSession } from "npm:capnweb@0.4.0"; // match README/server example
 import { Layout } from "../views/layout.tsx";
 import { RoomPage } from "./room-page.tsx";
 import { TodoFragment } from "../views/todo-fragment.tsx";
 
 type Todo = { id: string; text: string; done: boolean; createdAt: number };
+
+// Client-provided capability (a “remote object”)
+type RoomWatcher = {
+  roomChanged(version: number): void;
+};
+
 type Room = {
   id: string;
   version: number;
   todos: Todo[];
-  sockets: Set<WebSocket>;
+  watchers: Set<RoomWatcher>;
 };
 
 const rooms = new Map<string, Room>();
@@ -16,36 +23,68 @@ const rooms = new Map<string, Room>();
 function getRoom(id: string): Room {
   let r = rooms.get(id);
   if (!r) {
-    r = { id, version: 0, todos: [], sockets: new Set() };
+    r = { id, version: 0, todos: [], watchers: new Set() };
     rooms.set(id, r);
   }
   return r;
 }
 
-function broadcastRoomChanged(room: Room) {
-  room.version += 1;
-  const payload = JSON.stringify({
-    type: "changed",
-    roomId: room.id,
-    version: room.version,
-  });
+function notifyRoomChanged(room: Room) {
+  room.version++;
+  console.log(
+    "[notify]",
+    room.id,
+    "v",
+    room.version,
+    "watchers",
+    room.watchers.size,
+  );
 
-  for (const ws of Array.from(room.sockets)) {
-    try {
-      if (ws.readyState === WebSocket.OPEN) ws.send(payload);
-      else room.sockets.delete(ws);
-    } catch {
-      room.sockets.delete(ws);
-    }
+  for (const w of Array.from(room.watchers)) {
+    Promise.resolve(w.roomChanged(room.version)).catch((e) => {
+      console.log("[notify] watcher failed -> removing", e);
+      room.watchers.delete(w);
+      try {
+        w[Symbol.dispose]?.();
+      } catch {}
+    });
+  }
+}
+
+/** Cap’n Web API */
+class RootApi extends RpcTarget {
+  joinRoom(roomId: string) {
+    return new RoomApi(roomId);
+  }
+}
+
+class RoomApi extends RpcTarget {
+  constructor(private roomId: string) {
+    super();
+  }
+
+  watch(watcher: any) {
+    const room = getRoom(this.roomId);
+
+    // IMPORTANT: parameter stubs are auto-disposed when the call returns.
+    // Dup it to keep beyond this call. :contentReference[oaicite:1]{index=1}
+    const keep = watcher.dup();
+
+    room.watchers.add(keep);
+    console.log("[watch] added", this.roomId, "count", room.watchers.size);
+
+    // Optional initial ping; handle rejection explicitly
+    Promise.resolve(keep.roomChanged(room.version)).catch((e) => {
+      console.log("[watch] initial ping failed -> removing", e);
+      room.watchers.delete(keep);
+    });
   }
 }
 
 const app = new Hono();
 
-// Home
 app.get("/", (c) => c.redirect("/room/demo"));
 
-// Full page SSR
 app.get("/room/:roomId", (c) => {
   const roomId = c.req.param("roomId");
   return c.html(
@@ -55,21 +94,16 @@ app.get("/room/:roomId", (c) => {
   );
 });
 
-// Fragment SSR (used by htmx swaps + WS invalidation refresh)
 app.get("/_frag/room/:roomId/list", (c) => {
-  const roomId = c.req.param("roomId");
-  const room = getRoom(roomId);
+  const room = getRoom(c.req.param("roomId"));
   return c.html(<TodoFragment room={room} />);
 });
 
-// Action: add
+// htmx actions (same as before) — just swap notifyRoomChanged()
 app.post("/_action/room/:roomId/add", async (c) => {
-  const roomId = c.req.param("roomId");
-  const room = getRoom(roomId);
-
+  const room = getRoom(c.req.param("roomId"));
   const body = await c.req.parseBody();
   const text = String(body["text"] ?? "").trim();
-
   if (text) {
     room.todos.unshift({
       id: crypto.randomUUID(),
@@ -77,65 +111,45 @@ app.post("/_action/room/:roomId/add", async (c) => {
       done: false,
       createdAt: Date.now(),
     });
-    broadcastRoomChanged(room);
+    console.log("post add", room.id);
+    notifyRoomChanged(room);
   }
-
   return c.html(<TodoFragment room={room} />);
 });
 
-// Action: toggle
 app.post("/_action/room/:roomId/toggle/:todoId", (c) => {
-  const roomId = c.req.param("roomId");
+  const room = getRoom(c.req.param("roomId"));
   const todoId = c.req.param("todoId");
-  const room = getRoom(roomId);
-
   const t = room.todos.find((x) => x.id === todoId);
   if (t) {
     t.done = !t.done;
-    broadcastRoomChanged(room);
+    notifyRoomChanged(room);
   }
-
   return c.html(<TodoFragment room={room} />);
 });
 
-// Action: remove
 app.post("/_action/room/:roomId/remove/:todoId", (c) => {
-  const roomId = c.req.param("roomId");
+  const room = getRoom(c.req.param("roomId"));
   const todoId = c.req.param("todoId");
-  const room = getRoom(roomId);
-
   const before = room.todos.length;
   room.todos = room.todos.filter((x) => x.id !== todoId);
-  if (room.todos.length !== before) {
-    broadcastRoomChanged(room);
-  }
-
+  if (room.todos.length !== before) notifyRoomChanged(room);
   return c.html(<TodoFragment room={room} />);
 });
 
-// WebSocket endpoint: join a room and receive “changed” push events
-app.get("/ws/room/:roomId", (c) => {
-  const roomId = c.req.param("roomId");
-  const room = getRoom(roomId);
+/**
+ * Cap’n Web WebSocket endpoint.
+ * Client connects here and gets RootApi stub.
+ */
+const sessions = new WeakMap<WebSocket, unknown>();
 
+app.get("/api", (c) => {
   const { socket, response } = Deno.upgradeWebSocket(c.req.raw);
-
   socket.addEventListener("open", () => {
-    room.sockets.add(socket);
-    // optional: send a hello
-    socket.send(
-      JSON.stringify({ type: "hello", roomId: room.id, version: room.version }),
-    );
+    sessions.set(socket, newWebSocketRpcSession(socket, new RootApi()));
   });
-
-  socket.addEventListener("close", () => {
-    room.sockets.delete(socket);
-  });
-
-  socket.addEventListener("error", () => {
-    room.sockets.delete(socket);
-  });
-
+  socket.addEventListener("close", () => sessions.delete(socket));
+  socket.addEventListener("error", () => sessions.delete(socket));
   return response;
 });
 
