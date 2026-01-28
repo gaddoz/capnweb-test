@@ -46,7 +46,7 @@ export function RoomPage(props: {
   return (
     <div>
       <header>
-        <h1>Shared Todo Room</h1>
+        <h1>CapnWeb Todo Room</h1>
         <div class="muted">
           Room <code>{roomId}</code> • role <code>{role}</code>
         </div>
