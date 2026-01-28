@@ -1,4 +1,4 @@
-import { Hono } from "jsr:@hono/hono";
+import { Hono, type Context } from "jsr:@hono/hono";
 import { RpcTarget, newWebSocketRpcSession } from "npm:capnweb@0.4.0";
 import { Layout } from "../views/layout.tsx";
 import { RoomPage } from "./room-page.tsx";
@@ -31,7 +31,7 @@ type Invite = {
 
 function base64Url(bytes: Uint8Array) {
   let s = "";
-  for (const b of bytes) s += String.fromCharCode(b);
+  for (const b of bytes) s += String.fromCodePoint(b);
   const b64 = btoa(s);
   return b64.replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 }
@@ -135,7 +135,7 @@ type Room = {
 
 const rooms = new Map<string, Room>();
 
-function LockedRoomPage(props: { roomId: string }) {
+function LockedRoomPage(props: { readonly roomId: string }) {
   return (
     <Layout title={`Locked • ${props.roomId}`}>
       <div class="card">
@@ -178,19 +178,6 @@ function getRoom(id: string): Room {
   return r;
 }
 
-function notifyRoomChanged(room: Room) {
-  room.version += 1;
-
-  for (const w of Array.from(room.watchers)) {
-    Promise.resolve(w.roomChanged(room.version)).catch(() => {
-      room.watchers.delete(w);
-      try {
-        w?.[Symbol.dispose]?.();
-      } catch {}
-    });
-  }
-}
-
 async function ensureRoomWatch(roomId: string) {
   const room = getRoom(roomId);
   if (room.watchStarted) return;
@@ -223,7 +210,7 @@ class RootApi extends RpcTarget {
 }
 
 class RoomApi extends RpcTarget {
-  constructor(private roomId: string) {
+  constructor(private readonly roomId: string) {
     super();
   }
 
@@ -231,7 +218,7 @@ class RoomApi extends RpcTarget {
     await ensureRoomWatch(this.roomId);
 
     const room = getRoom(this.roomId);
-    const keep = (watcher as any).dup(); // required to keep param beyond call (you already learned this)
+    const keep = (watcher as any).dup();
     room.watchers.add(keep);
 
     const rec = await kvGetRoom(this.roomId);
@@ -244,10 +231,10 @@ const sessions = new WeakMap<WebSocket, unknown>();
 // --- App ---
 const app = new Hono();
 
-app.get("/", (c) => c.redirect("/room/demo"));
+app.get("/", (c: Context) => c.redirect("/room/demo"));
 
 // Resolve invite link: sets cookie, redirects to room
-app.get("/cap/:token", async (c) => {
+app.get("/cap/:token", async (c: Context) => {
   const token = c.req.param("token");
   const inv = await consumeInvite(token);
   if (!inv) return c.text("Invite invalid or expired.", 404);
@@ -257,7 +244,7 @@ app.get("/cap/:token", async (c) => {
 });
 
 // Room page (SSR)
-app.get("/room/:roomId", async (c) => {
+app.get("/room/:roomId", async (c: Context) => {
   const roomId = c.req.param("roomId");
 
   const cookies = parseCookies(c.req.header("cookie") ?? null);
@@ -284,7 +271,7 @@ app.get("/room/:roomId", async (c) => {
   );
 });
 
-app.post("/_action/room/:roomId/enter", async (c) => {
+app.post("/_action/room/:roomId/enter", async (c: Context) => {
   const roomId = c.req.param("roomId");
   const body = await c.req.parseBody();
   const capRaw = String(body["cap"] ?? "").trim();
@@ -308,7 +295,7 @@ app.post("/_action/room/:roomId/enter", async (c) => {
   return c.redirect(`/room/${encodeURIComponent(roomId)}`);
 });
 
-app.get("/bootstrap/:roomId", async (c) => {
+app.get("/bootstrap/:roomId", async (c: Context) => {
   const roomId = c.req.param("roomId");
 
   if (!ADMIN_BOOTSTRAP_KEY)
@@ -324,7 +311,7 @@ app.get("/bootstrap/:roomId", async (c) => {
 });
 
 // Fragment: todo list
-app.get("/_frag/room/:roomId/list", async (c) => {
+app.get("/_frag/room/:roomId/list", async (c: Context) => {
   const roomId = c.req.param("roomId");
   const rec = await kvGetRoom(roomId);
 
@@ -342,7 +329,7 @@ app.get("/_frag/room/:roomId/list", async (c) => {
 });
 
 // Action: add
-app.post("/_action/room/:roomId/add", async (c) => {
+app.post("/_action/room/:roomId/add", async (c: Context) => {
   const roomId = c.req.param("roomId");
 
   const cookies = parseCookies(c.req.header("cookie") ?? null);
@@ -374,7 +361,7 @@ app.post("/_action/room/:roomId/add", async (c) => {
 });
 
 // Action: toggle
-app.post("/_action/room/:roomId/toggle/:todoId", async (c) => {
+app.post("/_action/room/:roomId/toggle/:todoId", async (c: Context) => {
   const roomId = c.req.param("roomId");
   const todoId = c.req.param("todoId");
 
@@ -402,7 +389,7 @@ app.post("/_action/room/:roomId/toggle/:todoId", async (c) => {
 });
 
 // Action: remove
-app.post("/_action/room/:roomId/remove/:todoId", async (c) => {
+app.post("/_action/room/:roomId/remove/:todoId", async (c: Context) => {
   const roomId = c.req.param("roomId");
   const todoId = c.req.param("todoId");
   const rec = await kvGetRoom(roomId);
@@ -430,7 +417,7 @@ app.post("/_action/room/:roomId/remove/:todoId", async (c) => {
 });
 
 // Admin: mint invite link (returns small HTML fragment)
-app.post("/_action/room/:roomId/invite", async (c) => {
+app.post("/_action/room/:roomId/invite", async (c: Context) => {
   const roomId = c.req.param("roomId");
 
   const cookies = parseCookies(c.req.header("cookie") ?? null);
@@ -476,7 +463,7 @@ app.post("/_action/room/:roomId/invite", async (c) => {
 });
 
 // Cap’n Web WS endpoint
-app.get("/api", (c) => {
+app.get("/api", (c: Context) => {
   const { socket, response } = Deno.upgradeWebSocket(c.req.raw);
 
   socket.addEventListener("open", () => {

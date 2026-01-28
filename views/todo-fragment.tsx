@@ -3,7 +3,10 @@ type Role = "viewer" | "editor" | "admin";
 type Todo = { id: string; text: string; done: boolean; createdAt: number };
 type Room = { id: string; version: number; todos: Todo[] };
 
-export function TodoFragment(props: { room: Room; role: Role }) {
+export function TodoFragment(props: {
+  readonly room: Room;
+  readonly role: Role;
+}) {
   const room = props.room;
   const canEdit = props.role === "editor" || props.role === "admin";
 
@@ -33,6 +36,7 @@ export function TodoFragment(props: { room: Room; role: Role }) {
               </div>
 
               <button
+                type="button"
                 disabled={!canEdit}
                 hx-post={`/_action/room/${encodeURIComponent(room.id)}/remove/${encodeURIComponent(t.id)}`}
                 hx-target="#todo-list"
@@ -46,7 +50,7 @@ export function TodoFragment(props: { room: Room; role: Role }) {
         )}
       </div>
 
-      {!canEdit ? (
+      {canEdit === false ? (
         <div class="muted" style="margin-top:10px;">
           Viewer mode: live updates enabled, editing disabled.
         </div>

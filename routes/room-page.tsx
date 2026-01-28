@@ -1,11 +1,11 @@
 type Role = "viewer" | "editor" | "admin";
 
 export function RoomPage(props: {
-  roomId: string;
-  role: Role;
-  origin: string;
-  myCapToken: string | null;
-  roomVersion: number;
+  readonly roomId: string;
+  readonly role: Role;
+  readonly origin: string;
+  readonly myCapToken: string | null;
+  readonly roomVersion: number;
 }) {
   const roomId = props.roomId;
   const role = props.role;
