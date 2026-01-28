@@ -5,6 +5,19 @@ import { RoomPage } from "./room-page.tsx";
 import { TodoFragment } from "../views/todo-fragment.tsx";
 const ADMIN_BOOTSTRAP_KEY = "discgolf";
 
+const kv = await Deno.openKv(); // on Deploy this uses built-in KV :contentReference[oaicite:3]{index=3}
+
+type RoomRecord = { version: number; todos: Todo[] };
+
+async function kvGetRoom(roomId: string): Promise<RoomRecord> {
+  const res = await kv.get<RoomRecord>(["room", roomId]);
+  return res.value ?? { version: 0, todos: [] };
+}
+
+async function kvSetRoom(roomId: string, rec: RoomRecord) {
+  await kv.set(["room", roomId], rec);
+}
+
 type Todo = { id: string; text: string; done: boolean; createdAt: number };
 
 type Role = "viewer" | "editor" | "admin";
@@ -15,9 +28,6 @@ type Invite = {
   expiresAt: number;
   usesLeft?: number; // optional
 };
-
-// --- In-memory invite store (demo) ---
-const invites = new Map<string, Invite>();
 
 function base64Url(bytes: Uint8Array) {
   let s = "";
@@ -32,20 +42,52 @@ function randomToken(bytes = 24) {
   return base64Url(arr);
 }
 
-function mintInvite(
+async function mintInvite(
   roomId: string,
   role: Role,
   ttlMs: number,
   usesLeft?: number,
 ) {
   const token = randomToken(32);
-  invites.set(token, {
-    roomId,
-    role,
-    expiresAt: Date.now() + ttlMs,
-    usesLeft,
-  });
+  const inv: Invite = { roomId, role, expiresAt: Date.now() + ttlMs, usesLeft };
+  await kv.set(["invite", token], inv);
   return token;
+}
+
+async function getInvite(
+  token: string | undefined | null,
+): Promise<Invite | null> {
+  if (!token) return null;
+  const res = await kv.get<Invite>(["invite", token]);
+  const inv = res.value;
+  if (!inv) return null;
+  if (Date.now() > inv.expiresAt) {
+    await kv.delete(["invite", token]);
+    return null;
+  }
+  return inv;
+}
+
+async function consumeInvite(token: string): Promise<Invite | null> {
+  const res = await kv.get<Invite>(["invite", token]);
+  const inv = res.value;
+  if (!inv) return null;
+
+  if (Date.now() > inv.expiresAt) {
+    await kv.delete(["invite", token]);
+    return null;
+  }
+
+  if (inv.usesLeft != null) {
+    inv.usesLeft--;
+    if (inv.usesLeft <= 0) {
+      await kv.delete(["invite", token]);
+    } else {
+      await kv.set(["invite", token], inv);
+    }
+  }
+
+  return inv;
 }
 
 function getOrigin(req: Request) {
@@ -68,27 +110,6 @@ function parseCookies(cookieHeader: string | null): Record<string, string> {
   return out;
 }
 
-function getInviteFromToken(token: string | undefined | null): Invite | null {
-  if (!token) return null;
-  const inv = invites.get(token);
-  if (!inv) return null;
-  if (Date.now() > inv.expiresAt) {
-    invites.delete(token);
-    return null;
-  }
-  return inv;
-}
-
-function consumeInvite(token: string): Invite | null {
-  const inv = getInviteFromToken(token);
-  if (!inv) return null;
-  if (inv.usesLeft != null) {
-    inv.usesLeft--;
-    if (inv.usesLeft <= 0) invites.delete(token);
-  }
-  return inv;
-}
-
 function setCapCookie(c: any, token: string) {
   // Demo-friendly cookie: HttpOnly so JS can’t read it, but browser sends it on htmx posts + WS upgrades.
   // Add Secure automatically if https:
@@ -108,9 +129,8 @@ type RoomWatcher = { roomChanged(version: number): void };
 
 type Room = {
   id: string;
-  version: number;
-  todos: Todo[];
-  watchers: Set<any>; // Cap’n Web stubs (dup’ed)
+  watchers: Set<any>; // dup'ed capnweb watcher stubs
+  watchStarted: boolean;
 };
 
 const rooms = new Map<string, Room>();
@@ -152,7 +172,7 @@ function LockedRoomPage(props: { roomId: string }) {
 function getRoom(id: string): Room {
   let r = rooms.get(id);
   if (!r) {
-    r = { id, version: 0, todos: [], watchers: new Set() };
+    r = { id, watchers: new Set(), watchStarted: false };
     rooms.set(id, r);
   }
   return r;
@@ -171,6 +191,30 @@ function notifyRoomChanged(room: Room) {
   }
 }
 
+async function ensureRoomWatch(roomId: string) {
+  const room = getRoom(roomId);
+  if (room.watchStarted) return;
+  room.watchStarted = true;
+
+  // kv.watch emits whenever the key changes :contentReference[oaicite:4]{index=4}
+  (async () => {
+    for await (const entries of kv.watch([["room", roomId]])) {
+      const rec = entries[0]?.value as RoomRecord | null;
+      if (!rec) continue;
+
+      // notify local connected clients in THIS isolate
+      for (const w of Array.from(room.watchers)) {
+        Promise.resolve(w.roomChanged(rec.version)).catch(() => {
+          room.watchers.delete(w);
+          try {
+            w?.[Symbol.dispose]?.();
+          } catch {}
+        });
+      }
+    }
+  })();
+}
+
 // --- Cap’n Web API (watch only; roles enforced by cookie at HTTP layer) ---
 class RootApi extends RpcTarget {
   joinRoom(roomId: string) {
@@ -183,20 +227,15 @@ class RoomApi extends RpcTarget {
     super();
   }
 
-  watch(watcher: RoomWatcher) {
+  async watch(watcher: RoomWatcher) {
+    await ensureRoomWatch(this.roomId);
+
     const room = getRoom(this.roomId);
-
-    // IMPORTANT: parameter stubs are auto-disposed after the call returns.
-    // Duplicate it to keep it alive for future notifications.
-    // (This is why you previously saw “stub disposed”.)
-    const keep = (watcher as any).dup();
-
+    const keep = (watcher as any).dup(); // required to keep param beyond call (you already learned this)
     room.watchers.add(keep);
 
-    // optional: initial sync ping
-    Promise.resolve(keep.roomChanged(room.version)).catch(() => {
-      room.watchers.delete(keep);
-    });
+    const rec = await kvGetRoom(this.roomId);
+    await keep.roomChanged(rec.version);
   }
 }
 
@@ -208,9 +247,9 @@ const app = new Hono();
 app.get("/", (c) => c.redirect("/room/demo"));
 
 // Resolve invite link: sets cookie, redirects to room
-app.get("/cap/:token", (c) => {
+app.get("/cap/:token", async (c) => {
   const token = c.req.param("token");
-  const inv = consumeInvite(token);
+  const inv = await consumeInvite(token);
   if (!inv) return c.text("Invite invalid or expired.", 404);
 
   setCapCookie(c, token);
@@ -218,18 +257,18 @@ app.get("/cap/:token", (c) => {
 });
 
 // Room page (SSR)
-app.get("/room/:roomId", (c) => {
+app.get("/room/:roomId", async (c) => {
   const roomId = c.req.param("roomId");
 
   const cookies = parseCookies(c.req.header("cookie") ?? null);
   const token = cookies["mw_cap"];
-  const inv = getInviteFromToken(token);
+  const inv = await getInvite(token);
 
   if (!inv || inv.roomId !== roomId) {
     return c.html(<LockedRoomPage roomId={roomId} />, 403);
   }
 
-  const room = getRoom(roomId);
+  const rec = await kvGetRoom(roomId);
   const origin = getOrigin(c.req.raw);
 
   return c.html(
@@ -239,7 +278,7 @@ app.get("/room/:roomId", (c) => {
         role={inv.role}
         origin={origin}
         myCapToken={token ?? null}
-        roomVersion={room.version}
+        roomVersion={rec.version}
       />
     </Layout>,
   );
@@ -260,7 +299,7 @@ app.post("/_action/room/:roomId/enter", async (c) => {
     // not a URL, treat as token
   }
 
-  const inv = consumeInvite(token);
+  const inv = await consumeInvite(token);
   if (!inv || inv.roomId !== roomId) {
     return c.text("Invite invalid/expired or not for this room.", 403);
   }
@@ -269,34 +308,37 @@ app.post("/_action/room/:roomId/enter", async (c) => {
   return c.redirect(`/room/${encodeURIComponent(roomId)}`);
 });
 
-app.get("/bootstrap/:roomId", (c) => {
+app.get("/bootstrap/:roomId", async (c) => {
   const roomId = c.req.param("roomId");
 
-  if (!ADMIN_BOOTSTRAP_KEY) {
+  if (!ADMIN_BOOTSTRAP_KEY)
     return c.text("ADMIN_BOOTSTRAP_KEY not configured.", 500);
-  }
 
   const key = new URL(c.req.url).searchParams.get("key") ?? "";
-  if (key !== ADMIN_BOOTSTRAP_KEY) {
-    return c.text("Forbidden", 403);
-  }
+  if (key !== ADMIN_BOOTSTRAP_KEY) return c.text("Forbidden", 403);
 
-  // Mint admin invite and set cookie
-  const token = mintInvite(roomId, "admin", 24 * 60 * 60 * 1000); // 24h admin cookie for demo
+  const token = await mintInvite(roomId, "admin", 24 * 60 * 60 * 1000);
   setCapCookie(c, token);
+  console.log("me setting cookie token", token);
   return c.redirect(`/room/${encodeURIComponent(roomId)}`);
 });
 
 // Fragment: todo list
-app.get("/_frag/room/:roomId/list", (c) => {
+app.get("/_frag/room/:roomId/list", async (c) => {
   const roomId = c.req.param("roomId");
-  const room = getRoom(roomId);
+  const rec = await kvGetRoom(roomId);
 
+  // your role lookup stays the same, but now uses await getInvite(...)
   const cookies = parseCookies(c.req.header("cookie") ?? null);
-  const inv = getInviteFromToken(cookies["mw_cap"]);
+  const inv = await getInvite(cookies["mw_cap"]);
   const role: Role = inv && inv.roomId === roomId ? inv.role : "viewer";
 
-  return c.html(<TodoFragment room={room} role={role} />);
+  return c.html(
+    <TodoFragment
+      room={{ id: roomId, version: rec.version, todos: rec.todos }}
+      role={role}
+    />,
+  );
 });
 
 // Action: add
@@ -304,87 +346,87 @@ app.post("/_action/room/:roomId/add", async (c) => {
   const roomId = c.req.param("roomId");
 
   const cookies = parseCookies(c.req.header("cookie") ?? null);
-  const inv = getInviteFromToken(cookies["mw_cap"]);
+  const inv = await getInvite(cookies["mw_cap"]);
   const role: Role = inv && inv.roomId === roomId ? inv.role : "viewer";
+  if (!roleAllowsEdit(role)) return c.text("Forbidden", 403);
 
-  if (!roleAllowsEdit(role)) {
-    return c.html(
-      <div class="muted">
-        Not allowed (viewer link). Ask for an editor invite.
-      </div>,
-      403,
-    );
-  }
-
-  const room = getRoom(roomId);
   const body = await c.req.parseBody();
   const text = String(body["text"] ?? "").trim();
 
+  const rec = await kvGetRoom(roomId);
   if (text) {
-    room.todos.unshift({
+    rec.todos.unshift({
       id: crypto.randomUUID(),
       text,
       done: false,
       createdAt: Date.now(),
     });
-    notifyRoomChanged(room);
+    rec.version++;
+    await kvSetRoom(roomId, rec); // triggers kv.watch in all isolates :contentReference[oaicite:6]{index=6}
   }
 
-  return c.html(<TodoFragment room={room} role={role} />);
+  return c.html(
+    <TodoFragment
+      room={{ id: roomId, version: rec.version, todos: rec.todos }}
+      role={role}
+    />,
+  );
 });
 
 // Action: toggle
-app.post("/_action/room/:roomId/toggle/:todoId", (c) => {
+app.post("/_action/room/:roomId/toggle/:todoId", async (c) => {
   const roomId = c.req.param("roomId");
   const todoId = c.req.param("todoId");
 
   const cookies = parseCookies(c.req.header("cookie") ?? null);
-  const inv = getInviteFromToken(cookies["mw_cap"]);
+  const inv = await getInvite(cookies["mw_cap"]);
   const role: Role = inv && inv.roomId === roomId ? inv.role : "viewer";
 
-  if (!roleAllowsEdit(role)) {
-    return c.html(
-      <div class="muted">
-        Not allowed (viewer link). Ask for an editor invite.
-      </div>,
-      403,
-    );
-  }
+  if (!roleAllowsEdit(role)) return c.text("Forbidden", 403);
 
-  const room = getRoom(roomId);
-  const t = room.todos.find((x) => x.id === todoId);
+  const rec = await kvGetRoom(roomId);
+
+  const t = rec.todos.find((x) => x.id === todoId);
   if (t) {
     t.done = !t.done;
-    notifyRoomChanged(room);
+    rec.version++;
+    await kvSetRoom(roomId, rec);
   }
 
-  return c.html(<TodoFragment room={room} role={role} />);
+  return c.html(
+    <TodoFragment
+      room={{ id: roomId, version: rec.version, todos: rec.todos }}
+      role={role}
+    />,
+  );
 });
 
 // Action: remove
-app.post("/_action/room/:roomId/remove/:todoId", (c) => {
+app.post("/_action/room/:roomId/remove/:todoId", async (c) => {
   const roomId = c.req.param("roomId");
   const todoId = c.req.param("todoId");
+  const rec = await kvGetRoom(roomId);
 
   const cookies = parseCookies(c.req.header("cookie") ?? null);
-  const inv = getInviteFromToken(cookies["mw_cap"]);
+  const inv = await getInvite(cookies["mw_cap"]);
   const role: Role = inv && inv.roomId === roomId ? inv.role : "viewer";
 
-  if (!roleAllowsEdit(role)) {
-    return c.html(
-      <div class="muted">
-        Not allowed (viewer link). Ask for an editor invite.
-      </div>,
-      403,
-    );
+  if (!roleAllowsEdit(role)) return c.text("Forbidden", 403);
+
+  const before = rec.todos.length;
+  rec.todos = rec.todos.filter((x) => x.id !== todoId);
+
+  if (rec.todos.length !== before) {
+    rec.version++;
+    await kvSetRoom(roomId, rec);
   }
 
-  const room = getRoom(roomId);
-  const before = room.todos.length;
-  room.todos = room.todos.filter((x) => x.id !== todoId);
-  if (room.todos.length !== before) notifyRoomChanged(room);
-
-  return c.html(<TodoFragment room={room} role={role} />);
+  return c.html(
+    <TodoFragment
+      room={{ id: roomId, version: rec.version, todos: rec.todos }}
+      role={role}
+    />,
+  );
 });
 
 // Admin: mint invite link (returns small HTML fragment)
@@ -409,7 +451,7 @@ app.post("/_action/room/:roomId/invite", async (c) => {
     ? Math.max(60, Number(ttl))
     : 3600;
 
-  const token = mintInvite(roomId, wanted, ttlSec * 1000);
+  const token = await mintInvite(roomId, wanted, ttlSec * 1000);
   const link = `${getOrigin(c.req.raw)}/cap/${token}`;
 
   return c.html(

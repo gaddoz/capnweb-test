@@ -2,8 +2,8 @@
   "version": "5",
   "specifiers": {
     "jsr:@hono/hono@*": "4.11.7",
-    "jsr:@hono/hono@^4.11.7": "4.11.7",
-    "npm:capnweb@0.4.0": "0.4.0"
+    "npm:capnweb@0.4.0": "0.4.0",
+    "npm:hono@^4.11.7": "4.11.7"
   },
   "jsr": {
     "@hono/hono@4.11.7": {
@@ -13,11 +13,14 @@
   "npm": {
     "capnweb@0.4.0": {
       "integrity": "sha512-OgqPQcxnrAIqjrkAuwI4N9MP/mzseM5w9oLWb/oU63KveBJl1c8p41etLSVQUlYFiAYZu+h6/LJxKaDJd93xFw=="
+    },
+    "hono@4.11.7": {
+      "integrity": "sha512-l7qMiNee7t82bH3SeyUCt9UF15EVmaBvsppY2zQtrbIhl/yzBTny+YUxsVjSjQ6gaqaeVtZmGocom8TzBlA4Yw=="
     }
   },
   "workspace": {
     "dependencies": [
-      "jsr:@hono/hono@^4.11.7"
+      "npm:hono@^4.11.7"
     ]
   }
 }

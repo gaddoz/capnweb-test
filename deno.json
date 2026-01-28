@@ -1,13 +1,13 @@
 {
+  "unstable": ["kv"],
   "compilerOptions": {
     "jsx": "react-jsx",
-    "jsxImportSource": "hono/jsx",
-    "lib": ["dom", "deno.ns"]
+    "jsxImportSource": "hono/jsx"
   },
   "tasks": {
-    "dev": "deno run -A --watch main.ts"
+    "dev": "deno run -A --watch --unstable-kv main.ts"
   },
   "imports": {
-    "hono": "jsr:@hono/hono@^4.11.7"
+    "hono": "npm:hono@^4.11.7"
   }
 }
