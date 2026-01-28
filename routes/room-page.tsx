@@ -6,6 +6,7 @@ export function RoomPage(props: {
   readonly origin: string;
   readonly myCapToken: string | null;
   readonly roomVersion: number;
+  readonly adminLink?: string | null;
 }) {
   const roomId = props.roomId;
   const role = props.role;
@@ -79,6 +80,18 @@ export function RoomPage(props: {
         )}
       </div>
 
+      <div class="card">
+        <h2 style="margin-top:0;">Todos</h2>
+        <div
+          id="todo-list"
+          hx-get={`/_frag/room/${encodeURIComponent(roomId)}/list`}
+          hx-trigger="load"
+          hx-swap="innerHTML"
+        >
+          Loading…
+        </div>
+      </div>
+
       {role === "admin" ? (
         <div class="card">
           <h2 style="margin-top:0;">Invite links (capabilities)</h2>
@@ -119,17 +132,27 @@ export function RoomPage(props: {
         </div>
       ) : null}
 
-      <div class="card">
-        <h2 style="margin-top:0;">Todos</h2>
-        <div
-          id="todo-list"
-          hx-get={`/_frag/room/${encodeURIComponent(roomId)}/list`}
-          hx-trigger="load"
-          hx-swap="innerHTML"
-        >
-          Loading…
+      {props.adminLink ? (
+        <div class="card">
+          <h2 style="margin-top:0;">Save this admin link</h2>
+          <div class="muted">
+            This link is the authority. Anyone who has it becomes{" "}
+            <code>admin</code> for this room.
+          </div>
+          <div style="margin-top:8px;">
+            <input
+              type="text"
+              readonly
+              value={props.adminLink}
+              style="width: 100%; padding:10px 12px; border-radius:10px; border:1px solid #ccc;"
+              onclick="this.select()"
+            />
+          </div>
+          <div class="muted" style="margin-top:6px;">
+            Tip: copy it somewhere safe. You won’t see it again automatically.
+          </div>
         </div>
-      </div>
+      ) : null}
 
       <script type="module" dangerouslySetInnerHTML={{ __html: islandCode }} />
     </div>

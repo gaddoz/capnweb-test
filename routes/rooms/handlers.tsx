@@ -1,6 +1,7 @@
 import type { Context } from "jsr:@hono/hono";
 import { Layout } from "../../views/layout.tsx";
 import { RoomPage } from "../room-page.tsx";
+import { NewRoomPage } from "./new_page.tsx";
 import { TodoFragment } from "../../views/todo-fragment.tsx";
 import type { Role } from "./types.ts";
 import { roleAllowsEdit } from "./types.ts";
@@ -15,11 +16,40 @@ import {
 } from "./invites.ts";
 import { LockedRoomPage } from "./pages.tsx";
 
-export function makeHandlers(opts: { adminBootstrapKey: string }) {
-  const ADMIN_BOOTSTRAP_KEY = opts.adminBootstrapKey;
+function slugify(s: string) {
+  return s
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+}
 
+function shortId() {
+  return crypto.randomUUID().split("-")[0];
+}
+
+export function makeHandlers() {
   return {
-    home: (c: Context) => c.redirect("/room/demo"),
+    home: (c: Context) => c.redirect("/new"),
+
+    // NEW: public page
+    newRoomPage: (c: Context) => c.html(<NewRoomPage />),
+
+    // NEW: create private room + mint admin capability link
+    createRoom: async (c: Context) => {
+      const body = await c.req.parseBody();
+      const name = String(body["name"] ?? "").trim();
+      const base = name ? slugify(name) : "room";
+      const roomId = `${base}-${shortId()}`;
+
+      // Mint an admin invite and set it as cookie for creator
+      const token = await mintInvite(roomId, "admin", 7 * 24 * 60 * 60 * 1000);
+      setCapCookie(c, token);
+
+      // Show admin link once on landing
+      return c.redirect(`/room/${encodeURIComponent(roomId)}?created=1`);
+    },
 
     cap: async (c: Context) => {
       const token = c.req.param("token");
@@ -44,14 +74,22 @@ export function makeHandlers(opts: { adminBootstrapKey: string }) {
       const rec = await kvGetRoom(roomId);
       const origin = getOrigin(c.req.raw);
 
+      // Only show the admin link box if arriving from /new (created=1) AND you are admin.
+      const created = new URL(c.req.url).searchParams.get("created") === "1";
+      const adminLink =
+        created && inv.role === "admin" && token
+          ? `${origin}/cap/${token}`
+          : null;
+
       return c.html(
-        <Layout title={`Capnweb Todos • ${roomId}`}>
+        <Layout title={`Shared Todos • ${roomId}`}>
           <RoomPage
             roomId={roomId}
             role={inv.role}
             origin={origin}
             myCapToken={token ?? null}
             roomVersion={rec.version}
+            adminLink={adminLink}
           />
         </Layout>,
       );
@@ -74,20 +112,6 @@ export function makeHandlers(opts: { adminBootstrapKey: string }) {
         return c.text("Invite invalid/expired or not for this room.", 403);
       }
 
-      setCapCookie(c, token);
-      return c.redirect(`/room/${encodeURIComponent(roomId)}`);
-    },
-
-    bootstrap: async (c: Context) => {
-      const roomId = c.req.param("roomId");
-
-      if (!ADMIN_BOOTSTRAP_KEY)
-        return c.text("ADMIN_BOOTSTRAP_KEY not configured.", 500);
-
-      const key = new URL(c.req.url).searchParams.get("key") ?? "";
-      if (key !== ADMIN_BOOTSTRAP_KEY) return c.text("Forbidden", 403);
-
-      const token = await mintInvite(roomId, "admin", 24 * 60 * 60 * 1000);
       setCapCookie(c, token);
       return c.redirect(`/room/${encodeURIComponent(roomId)}`);
     },
