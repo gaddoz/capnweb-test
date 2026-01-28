@@ -434,7 +434,7 @@ app.post("/_action/room/:roomId/invite", async (c) => {
   const roomId = c.req.param("roomId");
 
   const cookies = parseCookies(c.req.header("cookie") ?? null);
-  const inv = getInviteFromToken(cookies["mw_cap"]);
+  const inv = await getInvite(cookies["mw_cap"]);
   const role: Role = inv && inv.roomId === roomId ? inv.role : "viewer";
 
   if (role !== "admin") {
