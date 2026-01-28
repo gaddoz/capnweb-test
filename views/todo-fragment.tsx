@@ -1,8 +1,11 @@
+type Role = "viewer" | "editor" | "admin";
+
 type Todo = { id: string; text: string; done: boolean; createdAt: number };
 type Room = { id: string; version: number; todos: Todo[] };
 
-export function TodoFragment(props: { room: Room }) {
+export function TodoFragment(props: { room: Room; role: Role }) {
   const room = props.room;
+  const canEdit = props.role === "editor" || props.role === "admin";
 
   return (
     <div>
@@ -21,6 +24,7 @@ export function TodoFragment(props: { room: Room }) {
                 <input
                   type="checkbox"
                   checked={t.done}
+                  disabled={!canEdit}
                   hx-post={`/_action/room/${encodeURIComponent(room.id)}/toggle/${encodeURIComponent(t.id)}`}
                   hx-target="#todo-list"
                   hx-swap="innerHTML"
@@ -29,6 +33,7 @@ export function TodoFragment(props: { room: Room }) {
               </div>
 
               <button
+                disabled={!canEdit}
                 hx-post={`/_action/room/${encodeURIComponent(room.id)}/remove/${encodeURIComponent(t.id)}`}
                 hx-target="#todo-list"
                 hx-swap="innerHTML"
@@ -40,6 +45,12 @@ export function TodoFragment(props: { room: Room }) {
           ))
         )}
       </div>
+
+      {!canEdit ? (
+        <div class="muted" style="margin-top:10px;">
+          Viewer mode: live updates enabled, editing disabled.
+        </div>
+      ) : null}
     </div>
   );
 }
