@@ -1,6 +1,8 @@
-## capnweb demo
+## capnweb demo (deno hono htmx)
+
+`deno run dev`
 
 steps:
-- visit server/bootstrap/${room}?key=${key} for opening a room
+- create your room 
 - send invites
-- collab on rodo
+- collab on the todo list
